@@ -16,6 +16,8 @@ EVENTLOGRECORD_SIZE = len(c_evt.EVENTLOGRECORD)
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dissect.eventlog.message_resolver import MessageResolver
+
 # Should be refactored to a NamedTuple, but this requires fix all typing in the project
 Record = namedtuple(  # noqa: PYI024
     "Record",
@@ -36,7 +38,9 @@ Record = namedtuple(  # noqa: PYI024
         "Strings",
         "Data",
         "record",
+        "Message",
     ],
+    defaults=(None,),  # Message defaults to None
 )
 
 BLOCK_SIZE = 4096
@@ -46,8 +50,9 @@ DIRTY_NEEDLE = b"\x28\x00\x00\x00" + (b"\x11" * 4) + (b"\x22" * 4) + (b"\x33" * 
 class Evt:
     """Windows Event files for WinOS up until Windows XP."""
 
-    def __init__(self, fh: BinaryIO):
+    def __init__(self, fh: BinaryIO, resolver: MessageResolver | None = None):
         self.fh = fh
+        self.resolver = resolver
 
         if not hasattr(fh, "size"):
             pos = fh.tell()
@@ -178,7 +183,7 @@ class Evt:
                 fh.seek(pos + record.Length)
                 continue
 
-            yield parse_record(record, buffer)
+            yield parse_record(record, buffer, resolver=self.resolver)
 
             last_pos = pos
             fh.seek(next_pos)
@@ -201,7 +206,7 @@ def find_needle(fh: BinaryIO, needle: bytes) -> Iterator[int]:
         fh.seek(offset + BLOCK_SIZE - overlap_len)
 
 
-def parse_record(record: c_evt.EVENTLOGRECORD, buf: BinaryIO) -> Record:
+def parse_record(record: c_evt.EVENTLOGRECORD, buf: BinaryIO, resolver: MessageResolver | None = None) -> Record:
     pos = buf.tell()
 
     source = c_evt.wchar[None](buf)
@@ -227,6 +232,12 @@ def parse_record(record: c_evt.EVENTLOGRECORD, buf: BinaryIO) -> Record:
         buf.seek(record_start + record.DataOffset)
         data = buf.read(record.DataLength)
 
+    message = None
+    if resolver is not None:
+        event_id = record.EventID & 0xFFFF
+        qualifiers = (record.EventID >> 16) & 0xFFFF
+        message = resolver.resolve(event_id, qualifiers, [str(s) for s in fields])
+
     return Record(
         record.RecordNumber,
         datetime.fromtimestamp(record.TimeGenerated, tz=timezone.utc),
@@ -244,6 +255,7 @@ def parse_record(record: c_evt.EVENTLOGRECORD, buf: BinaryIO) -> Record:
         fields,
         data,
         record,
+        message,
     )
 
 

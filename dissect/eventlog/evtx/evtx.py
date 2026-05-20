@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from dissect.eventlog.message_resolver import MessageResolver
     from dissect.eventlog.utils import KeyValueCollection
 
 log = logging.getLogger(__name__)
@@ -22,8 +23,9 @@ log.setLevel(os.getenv("DISSECT_LOG_EVTX", "CRITICAL"))
 
 
 class ElfChnk:
-    def __init__(self, d: bytes, path: Path | None = None):
+    def __init__(self, d: bytes, path: Path | None = None, resolver: MessageResolver | None = None):
         self.path = path
+        self.resolver = resolver
         self.stream = io.BytesIO(d)
         self.header = c_evtx.EVTX_CHUNK(self.stream)
 
@@ -65,6 +67,20 @@ class ElfChnk:
                 bxml.set_name_reader(EvtxNameReader(bxml))
                 rec = parse_bxml(bxml)
 
+                if self.resolver is not None:
+                    event_id = rec.get("EventID", 0)
+                    qualifiers = rec.get("EventID_Qualifiers", 0)
+                    insertion_strings = rec.get("Data") or []
+                    if not isinstance(insertion_strings, list):
+                        insertion_strings = [insertion_strings]
+                    message = self.resolver.resolve(
+                        int(event_id) if event_id is not None else 0,
+                        int(qualifiers) if qualifiers is not None else 0,
+                        [str(s) for s in insertion_strings],
+                    )
+                    if message is not None:
+                        rec["Message"] = message
+
                 # Validate record
                 if (
                     "TimeCreated_SystemTime" not in rec
@@ -87,8 +103,9 @@ class ElfChnk:
 class Evtx:
     """Microsoft Event logs."""
 
-    def __init__(self, fh: BinaryIO, path: Path | None = None):
+    def __init__(self, fh: BinaryIO, path: Path | None = None, resolver: MessageResolver | None = None):
         self.path = path
+        self.resolver = resolver
         self.fh = fh
         self.header = c_evtx.EVTX_HEADER(self.fh)
         self.count = 0
@@ -106,7 +123,7 @@ class Evtx:
                 break
 
             try:
-                c = ElfChnk(chunk, self.path)
+                c = ElfChnk(chunk, self.path, resolver=self.resolver)
                 for r in c.read():
                     yield r
                     self.count += 1
